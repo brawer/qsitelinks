@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: 2022 Sascha Brawer <sascha@brawer.ch>
+# SPDX-License-Identifier: MIT
+#
+# Configuration for running the build-sitelinks job on Toolforge Kubernetes.
+# https://wikitech.wikimedia.org/wiki/Help:Toolforge/Jobs_framework
+---
+- name: build-sitelinks
+  cpu: 1
+  mem: 1Gi
+  image: tf-bullseye-std
+  command: ./build-sitelinks
+  emails: none
