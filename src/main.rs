@@ -21,9 +21,11 @@ use bzip2::read::MultiBzDecoder;
 use clap::Parser;
 use lmdb;
 use lmdb::Transaction;
+use regex::Regex;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -32,29 +34,47 @@ use unicode_casefold::{Locale, UnicodeCaseFold, Variant};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
-struct Args {
-    /// Path to wikidata dump file in json.bz2 format
-    wikidata_dump: PathBuf,
-}
+struct Args {}
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let args = Args::parse();
+    let dump = find_latest_dump()?;
+    let dump_file_name = dump.file_name().unwrap().to_str().unwrap();
+    let re = Regex::new(r"wikidata-(\d{8})-all\.json\.bz2").unwrap();
+    let cur_version = &re.captures(dump_file_name).unwrap()[1];
+    let published = fs::read_to_string("published_version");
+    let published = published.unwrap_or(String::from(""));
+    if published.trim() == cur_version {
+        println!("Already published sitelinks-{}, nothing to do", cur_version);
+        return Ok(());
+    }
 
-    let mut env_flags = lmdb::EnvironmentFlags::empty();
-    env_flags.set(lmdb::EnvironmentFlags::NO_SUB_DIR, true);
-    env_flags.set(lmdb::EnvironmentFlags::WRITE_MAP, true);
+    let sitelinks_path = PathBuf::from(format!("sitelinks-{cur_version}.mdb"));
+    let lock_path = PathBuf::from(format!("sitelinks-{cur_version}.mdb-lock"));
+    let zst_path = PathBuf::from(format!("sitelinks-{cur_version}.mdb.zst"));
+    _ = fs::remove_file(sitelinks_path.clone());
+    _ = fs::remove_file(lock_path.clone());
 
-    let env_path = PathBuf::from("qsitelinks.mdb");
-    let output_path = PathBuf::from("qsitelinks.mdb.zst");
-    let env = lmdb::Environment::new()
-        .set_flags(env_flags)
-        .set_map_size(8 * 1024 * 1024 * 1024)
-        .set_max_dbs(1)
-        .open(&env_path)
-        .expect("cannot create LMDB environment");
-    let db = env.create_db(None, lmdb::DatabaseFlags::empty())?;
-    process(&args.wikidata_dump, &env, &db)?;
-    compress(&env_path, &output_path)?;
+    if !zst_path.exists() {
+        let mut env_flags = lmdb::EnvironmentFlags::empty();
+        env_flags.set(lmdb::EnvironmentFlags::NO_SUB_DIR, true);
+        let env = lmdb::Environment::new()
+            .set_flags(env_flags)
+            .set_map_size(8 * 1024 * 1024 * 1024)
+            .set_max_dbs(1)
+            .open(&sitelinks_path)
+            .expect("cannot create LMDB environment");
+        let db = env.create_db(None, lmdb::DatabaseFlags::empty())?;
+        process(&dump, &env, &db)?;
+        drop(&db);
+        drop(&env);
+        compress(&sitelinks_path, &zst_path)?;
+        _ = fs::remove_file(sitelinks_path.clone());
+        _ = fs::remove_file(lock_path.clone());
+    }
+
+    upload(&zst_path)?;
+
+    fs::write("published_version", format!("{cur_version}\n"))?;
     Ok(())
 }
 
@@ -98,7 +118,7 @@ fn process(
                 );
             }
         }
-        if true && num_lines > 100 {
+        if true && num_lines > 10000 {
             break;
         }
         let e: serde_json::Result<Entity> = serde_json::from_str(&line);
@@ -202,9 +222,19 @@ fn make_key(lang: &str, site: &str, title: &str) -> String {
     return s;
 }
 
+fn find_latest_dump() -> Result<PathBuf, Box<dyn Error>> {
+    let path =
+        fs::canonicalize("../public/dumps/public/wikidatawiki/entities/latest-all.json.bz2")?;
+    Ok(path)
+}
+
 fn compress(db_path: &Path, out_path: &Path) -> Result<(), Box<dyn Error>> {
     let in_file = File::open(db_path)?;
     let out_file = File::create(out_path)?;
     zstd::stream::copy_encode(in_file, out_file, 11)?;
+    Ok(())
+}
+
+fn upload(_zst_path: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
